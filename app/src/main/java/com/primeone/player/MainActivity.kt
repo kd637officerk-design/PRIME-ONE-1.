@@ -5,6 +5,12 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.MediaStore
+import android.database.Cursor
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import org.json.JSONArray
+import org.json.JSONObject
 import android.os.Build
 import android.os.Bundle
 import android.webkit.JavascriptInterface
@@ -72,6 +78,17 @@ class MainActivity : Activity() {
         }
 
         web.webViewClient = object : WebViewClient() {
+            // Stream MediaStore content:// audio URIs into the HTML audio element.
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                val uri = request?.url ?: return null
+                if (uri.scheme != "content") return super.shouldInterceptRequest(view, request)
+                return try {
+                    val stream = contentResolver.openInputStream(uri) ?: return null
+                    val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+                    WebResourceResponse(mime, null, stream)
+                } catch (_: Exception) { null }
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 view?.evaluateJavascript("window.__PRIME_ONE_ANDROID__=true;", null)
@@ -133,6 +150,100 @@ class MainActivity : Activity() {
 
 class KD6Bridge(private val activity: Activity) {
     @JavascriptInterface fun hello() { /* bridge handshake */ }
+
+    // MediaStore scan used by the player's Scan and Browse by folder features.
+    @JavascriptInterface fun requestMusicPermission(): Boolean {
+        val permission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
+            else Manifest.permission.READ_EXTERNAL_STORAGE
+        if (Build.VERSION.SDK_INT < 23 || ContextCompat.checkSelfPermission(activity, permission) == PackageManager.PERMISSION_GRANTED) return true
+        activity.runOnUiThread {
+            ActivityCompat.requestPermissions(activity, arrayOf(permission), 42)
+        }
+        return false
+    }
+
+    @JavascriptInterface fun listMusic(): String {
+        val permission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
+            else Manifest.permission.READ_EXTERNAL_STORAGE
+        if (Build.VERSION.SDK_INT >= 23 && ContextCompat.checkSelfPermission(activity, permission) != PackageManager.PERMISSION_GRANTED) {
+            return JSONObject().put("permissionRequired", true).put("songs", JSONArray()).toString()
+        }
+
+        val songs = JSONArray()
+        val seen = HashSet<String>()
+        var queriedVolumes = 0
+        val projection = arrayOf(
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.TITLE,
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.ARTIST,
+            MediaStore.Audio.Media.ALBUM,
+            MediaStore.Audio.Media.DURATION,
+            MediaStore.Audio.Media.DATA
+        )
+        try {
+            // Query each mounted MediaStore volume. Some Android devices do not
+            // return internal-storage audio reliably from the aggregate EXTERNAL URI.
+            val volumes: Set<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.getExternalVolumeNames(activity)
+            } else {
+                setOf("external")
+            }
+            for (volume in volumes) {
+                val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    MediaStore.Audio.Media.getContentUri(volume)
+                else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                val sort = "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
+                activity.contentResolver.query(collection, projection, null, null, sort)?.use { c ->
+                    queriedVolumes++
+                    val idCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                    val titleCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                    val nameCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+                    val artistCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                    val albumCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+                    val durationCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                    val dataCol = c.getColumnIndex(MediaStore.Audio.Media.DATA)
+                    while (c.moveToNext()) {
+                        val id = c.getLong(idCol)
+                        if (!seen.add("$volume:$id")) continue
+                        val displayName = c.getString(nameCol) ?: "Unknown audio"
+                        val rawPath = if (dataCol >= 0 && !c.isNull(dataCol)) c.getString(dataCol) else null
+                        val path = rawPath?.takeIf { it.isNotBlank() }
+                            ?: "/storage/emulated/0/Music/$displayName"
+                        val fileName = path.substringAfterLast('/')
+                        val folder = path.substringBeforeLast('/', "/storage/emulated/0/Music")
+                        val contentUri = android.content.ContentUris.withAppendedId(collection, id)
+                        val rawTitle = c.getString(titleCol)
+                        val title = rawTitle?.takeIf { it.isNotBlank() && it != "<unknown>" }
+                            ?: fileName.substringBeforeLast('.', fileName)
+                        val artist = c.getString(artistCol)?.takeIf { it.isNotBlank() && it != "<unknown>" }
+                        val album = c.getString(albumCol)?.takeIf { it.isNotBlank() && it != "<unknown>" }
+                        val item = JSONObject()
+                            .put("id", "$volume:$id")
+                            .put("title", title)
+                            .put("name", fileName)
+                            .put("path", path)
+                            .put("folder", folder)
+                            .put("uri", contentUri.toString())
+                            .put("duration", (c.getLong(durationCol) / 1000.0))
+                        if (artist != null) item.put("artist", artist)
+                        if (album != null) item.put("album", album)
+                        songs.put(item)
+                    }
+                }
+            }
+            return JSONObject()
+                .put("permissionRequired", false)
+                .put("queriedVolumes", queriedVolumes)
+                .put("count", songs.length())
+                .put("songs", songs).toString()
+        } catch (e: Exception) {
+            return JSONObject().put("permissionRequired", false)
+                .put("queriedVolumes", queriedVolumes)
+                .put("error", e.message ?: "Media scan failed")
+                .put("songs", songs).toString()
+        }
+    }
 
     @JavascriptInterface fun meta(title: String, artist: String, album: String, artwork: String) {
         val i = Intent(activity, PlaybackService::class.java).apply {
