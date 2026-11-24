@@ -20,9 +20,9 @@ import java.util.Base64
 
 class PlaybackService : Service() {
     private lateinit var session: MediaSessionCompat
-    private var title = "PRIME ONE"
+    private var title = "EXO-1"
     private var artist = "Media player"
-    private var album = "PRIME ONE"
+    private var album = "EXO-1"
     private var art: Bitmap? = null
     private var duration = 0L
     private var position = 0L
@@ -32,7 +32,7 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        session = MediaSessionCompat(this, "PRIME_ONE_SESSION").apply {
+        session = MediaSessionCompat(this, "EXO_1_SESSION").apply {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() { MainActivity.sendAction("play"); setPlaying(true) }
                 override fun onPause() { MainActivity.sendAction("pause"); setPlaying(false) }
@@ -134,7 +134,7 @@ class PlaybackService : Service() {
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             val channel = NotificationChannel(CHANNEL_ID, "Music playback", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Playback controls shown when PRIME ONE plays music"
+                description = "Playback controls shown when EXO-1 plays music"
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                 setShowBadge(false)
             }

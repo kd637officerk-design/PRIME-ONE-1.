@@ -1738,7 +1738,21 @@ $('#vN').onclick=()=>step(1,false,'video');$('#vP').onclick=()=>step(-1,false,'v
 const CAP=window.Capacitor,NATIVE=!!(CAP&&CAP.isNativePlatform&&CAP.isNativePlatform());
 const nat=n=>{if(!NATIVE)return null;try{const p=(CAP.Plugins&&CAP.Plugins[n])||(CAP.registerPlugin&&CAP.registerPlugin(n));if(p)return p}catch(_){}
  if(CAP.nativePromise)return new Proxy({},{get:(_,m)=>m==='then'?undefined:o=>CAP.nativePromise(n,m,o||{})});return null};
-const MSN=nat('MediaSession'),LM=nat('LocalMusic');
+const MSN=nat('MediaSession');
+// Native Android WebView bridge: MediaStore is queried directly by MainActivity.
+const LM=nat('LocalMusic')||((window.KD6Native&&window.KD6Native.listMusic)?(()=>{
+ const B=window.KD6Native, j=v=>{try{return typeof v==='string'?JSON.parse(v):v||{}}catch(_){return {}}};
+ return {
+  list:async()=>j(B.listMusic()), requestPermission:()=>B.requestMusicPermission(),
+  hasAllFiles:async()=>j(B.hasAllFiles()), requestAllFiles:async()=>B.requestAllFiles(),
+  listStorage:async o=>j(B.listStorage((o&&o.path)||'/storage/emulated/0')),
+  listDir:async o=>{const r=j(B.listStorage((o&&o.dir)||'/storage/emulated/0'));return {names:(r.entries||[]).filter(x=>!x.directory&&(!o.ext||x.name.toLowerCase().endsWith(o.ext))).map(x=>x.name),entries:r.entries||[]}},
+  deleteFile:async o=>B.deleteFile(o.path), writeFile:async o=>B.writeFile(o.path,o.data,!!o.keepTime),
+  openUrl:async o=>B.openUrl(typeof o==='string'?o:o.url), openAppSettings:async()=>B.openAppSettings(),
+  renameFile:async o=>j(B.renameFile(o.path,o.name)), copyFile:async o=>j(B.copyFile(o.path,o.destination)), moveFile:async o=>j(B.moveFile(o.path,o.destination)),
+  canOverlay:async()=>({value:false}),requestOverlay:async()=>{},setLockEnabled:async()=>{},setNowPlaying:async()=>{},addListener:async()=>{},latestImage:async()=>null
+ };
+})():null);
 /* direct Java bridge for the notification-panel player (Android app only) */
 const kn=()=>window.KD6Native||null;let KH=null;window.__kd6act=(a,d)=>{try{KH&&KH[a]&&KH[a](d||{})}catch(_){}};
 {const k=kn();if(k)try{k.hello()}catch(_){}}
@@ -1772,7 +1786,10 @@ async function scanDevice(silent){
  if(scanBusy)return;scanBusy=true;
  try{
   if(!silent)toast('Scanning this phone for music…');
-  const r=await LM.list({minSeconds:0}),allSongs=(r&&r.songs)||[];
+  const r=await LM.list({minSeconds:0});
+  if(r&&r.permissionRequired){try{LM.requestPermission()}catch(_){}toast('Allow music and audio access, then tap Scan again');return}
+  if(r&&r.error)throw new Error(r.error);
+  const allSongs=(r&&r.songs)||[];
   const minSec=S.minSec==null?0:S.minSec,songs=allSongs.filter(x=>(x.duration||0)>=minSec);
   // Reconcile the local library with the phone's current MediaStore index. Files deleted elsewhere disappear from the player too.
   const phonePaths=new Set(allSongs.map(x=>x.path));
@@ -1784,7 +1801,7 @@ async function scanDevice(silent){
   if(!fresh.length){if(!silent)toast('No new songs found ('+songs.length+' on this phone)');return}
   const news=[];
   for(let i=0;i<fresh.length;i++){
-   const x=fresh[i],t={id:uid(),name:x.title||x.name||'Unknown',kind:'audio',blob:null,cover:null,local:1,chk:2,dur:x.duration||0,path:x.path,url:CAP.convertFileSrc('file://'+x.path),folder:x.folder||''};
+   const x=fresh[i],t={id:uid(),name:x.title||x.name||'Unknown',kind:'audio',blob:null,cover:null,local:1,chk:2,dur:x.duration||0,path:x.path,url:x.uri||(CAP&&CAP.convertFileSrc?CAP.convertFileSrc('file://'+x.path):'file://'+x.path),folder:x.folder||''};
    if(x.artist)t.artist=x.artist;if(x.album)t.album=x.album;
    tracks.push(t);news.push(t);await putT(t);
    if(i%50===49){if(!silent)toast('Adding '+(i+1)+' / '+fresh.length+'…');await new Promise(r=>setTimeout(r,0))}
@@ -1792,6 +1809,7 @@ async function scanDevice(silent){
   if(!silent&&TAB.audio)S.tab=TAB.audio;render();save();
   toast('Added '+fresh.length+' songs');
   setTimeout(bgMeta,400);bgTags(news);
+  if(!silent&&typeof foldersSheet==='function')setTimeout(()=>foldersSheet(ROOT),250);
  }catch(e){toast(/denied/i.test(String(e&&e.message||e))?'Allow “Music and audio” access in Android settings, then try again':'Could not scan: '+(e&&e.message||e))}
  finally{scanBusy=false}
 }
@@ -1888,7 +1906,7 @@ async function browseStorage(dir){
   if(!entries.length)items.push({icon:'📂',label:'This folder is empty',keep:true,fn:()=>{}});
   entries.forEach(x=>items.push({icon:x.directory?'📁':'📄',label:x.name+(x.directory?'/':' · '+fmtBytes(x.size)),fn:()=>{
    if(x.directory){browseStorage(x.path);return}
-   sheet(x.name,[{icon:'ℹ️',label:x.path,keep:true,fn:()=>{}},{icon:'↗',label:'Open / play this file',fn:()=>{const ext=(x.name.split('.').pop()||'').toLowerCase();if(/^(mp3|m4a|aac|flac|wav|ogg|opus|amr|mid|midi)$/.test(ext)){scanDevice(true);toast('Rescanning media library…')}else if(/^(mp4|mkv|webm|mov|m4v|3gp)$/.test(ext)){scanDevice(true);toast('Rescanning media library…')}else if(LM.openUrl){LM.openUrl('file://'+x.path).catch(()=>toast('This file type cannot be opened directly here'))}else toast('Use your phone file manager to open this file')}},{icon:'🗑',label:'Delete permanently from phone',fn:async()=>{if(!confirm('Permanently delete '+x.name+' from your phone? This cannot be undone.'))return;try{await LM.deleteFile({path:x.path});toast('Deleted from phone');browseStorage(dir);scanDevice(true)}catch(e){toast('Could not delete: '+(e&&e.message||e))}}}]);
+   sheet(x.name,[{icon:'ℹ️',label:x.path,keep:true,fn:()=>{}},{icon:'↗',label:'Open / play this file',fn:()=>{const ext=(x.name.split('.').pop()||'').toLowerCase();if(/^(mp3|m4a|aac|flac|wav|ogg|opus|amr|mid|midi)$/.test(ext)){scanDevice(true);toast('Rescanning media library…')}else if(/^(mp4|mkv|webm|mov|m4v|3gp)$/.test(ext)){scanDevice(true);toast('Rescanning media library…')}else if(LM.openUrl){LM.openUrl({url:'file://'+x.path}).catch(()=>toast('This file type cannot be opened directly here'))}else toast('Use your phone file manager to open this file')}},{icon:'✏️',label:'Rename file',fn:async()=>{const nn=prompt('Enter the new file name:',x.name);if(!nn||nn===x.name)return;try{await LM.renameFile({path:x.path,name:nn});toast('Renamed');browseStorage(dir)}catch(e){toast('Rename failed: '+(e&&e.message||e))}}},{icon:'📄',label:'Make a copy',fn:async()=>{const dest=dir+'/Copy of '+x.name;if(!confirm('Create a copy here?\n'+dest))return;try{await LM.copyFile({path:x.path,destination:dest});toast('Copy created');browseStorage(dir)}catch(e){toast('Copy failed: '+(e&&e.message||e))}}},{icon:'📦',label:'Move file',fn:async()=>{const dest=prompt('Enter the full destination path:',dir+'/'+x.name);if(!dest||dest===x.path)return;try{await LM.moveFile({path:x.path,destination:dest});toast('Moved');browseStorage(dir)}catch(e){toast('Move failed: '+(e&&e.message||e))}}},{icon:'🗑',label:'Delete permanently from phone',fn:async()=>{if(!confirm('Permanently delete '+x.name+' from your phone? This cannot be undone.'))return;try{await LM.deleteFile({path:x.path});toast('Deleted from phone');browseStorage(dir);scanDevice(true)}catch(e){toast('Could not delete: '+(e&&e.message||e))}}}]);
   }}));
   sheet('Internal Storage',items);
  }catch(e){toast('Cannot read storage: '+(e&&e.message||e))}

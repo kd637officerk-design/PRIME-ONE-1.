@@ -12,7 +12,13 @@ import android.webkit.WebResourceResponse
 import org.json.JSONArray
 import org.json.JSONObject
 import android.os.Build
+import android.provider.Settings
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import android.util.Base64
 import android.os.Bundle
+import android.os.Environment
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -153,12 +159,16 @@ class KD6Bridge(private val activity: Activity) {
 
     // MediaStore scan used by the player's Scan and Browse by folder features.
     @JavascriptInterface fun requestMusicPermission(): Boolean {
-        val permission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
-            else Manifest.permission.READ_EXTERNAL_STORAGE
-        if (Build.VERSION.SDK_INT < 23 || ContextCompat.checkSelfPermission(activity, permission) == PackageManager.PERMISSION_GRANTED) return true
-        activity.runOnUiThread {
-            ActivityCompat.requestPermissions(activity, arrayOf(permission), 42)
+        val permissions = if (Build.VERSION.SDK_INT >= 33) arrayOf(
+            Manifest.permission.READ_MEDIA_AUDIO,
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO
+        ) else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        val missing = permissions.filter {
+            Build.VERSION.SDK_INT >= 23 && ContextCompat.checkSelfPermission(activity, it) != PackageManager.PERMISSION_GRANTED
         }
+        if (missing.isEmpty()) return true
+        activity.runOnUiThread { ActivityCompat.requestPermissions(activity, missing.toTypedArray(), 42) }
         return false
     }
 
@@ -244,6 +254,122 @@ class KD6Bridge(private val activity: Activity) {
                 .put("songs", songs).toString()
         }
     }
+
+    private fun storageAllowed(): Boolean = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+
+    private fun safeStoragePath(raw: String): File {
+        val root = Environment.getExternalStorageDirectory().canonicalFile
+        val target = File(raw).canonicalFile
+        if (target.path != root.path && !target.path.startsWith(root.path + File.separator)) {
+            throw SecurityException("Only shared internal storage is available")
+        }
+        return target
+    }
+
+    @JavascriptInterface fun hasAllFiles(): String = JSONObject()
+        .put("value", storageAllowed()).toString()
+
+    @JavascriptInterface fun requestAllFiles(): String {
+        if (Build.VERSION.SDK_INT >= 30 && !storageAllowed()) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + activity.packageName))
+                activity.startActivity(intent)
+            } catch (_: Exception) {
+                activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            }
+        }
+        return "{}"
+    }
+
+    @JavascriptInterface fun openAppSettings(): String {
+        activity.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:" + activity.packageName)))
+        return "{}"
+    }
+
+    @JavascriptInterface fun listStorage(path: String): String {
+        if (!storageAllowed()) return JSONObject().put("permissionRequired", true).put("entries", JSONArray()).toString()
+        return try {
+            val dir = safeStoragePath(path.ifBlank { Environment.getExternalStorageDirectory().absolutePath })
+            if (!dir.exists() || !dir.isDirectory) throw IllegalArgumentException("Folder not found")
+            val all = dir.listFiles()?.sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() })) ?: emptyList()
+            val arr = JSONArray()
+            all.take(1000).forEach { f ->
+                arr.put(JSONObject().put("name", f.name).put("path", f.absolutePath)
+                    .put("directory", f.isDirectory).put("size", if (f.isFile) f.length() else 0L)
+                    .put("modified", f.lastModified()))
+            }
+            JSONObject().put("path", dir.absolutePath).put("truncated", all.size > 1000).put("entries", arr).toString()
+        } catch (e: Exception) { JSONObject().put("error", e.message ?: "Cannot list folder").put("entries", JSONArray()).toString() }
+    }
+
+    @JavascriptInterface fun listDir(path: String): String = listStorage(path)
+
+    @JavascriptInterface fun deleteFile(path: String): String {
+        if (!storageAllowed()) throw SecurityException("Enable All files access first")
+        val f = safeStoragePath(path)
+        if (!f.exists()) throw IllegalArgumentException("File no longer exists")
+        if (f.isDirectory) throw IllegalArgumentException("Folder deletion is disabled for safety")
+        if (!f.delete()) throw IllegalStateException("Android could not delete this file")
+        return "{}"
+    }
+
+    @JavascriptInterface fun renameFile(path: String, newName: String): String {
+        if (!storageAllowed()) throw SecurityException("Enable All files access first")
+        if (newName.isBlank() || newName.contains("/") || newName.contains("\\")) throw IllegalArgumentException("Invalid file name")
+        val src = safeStoragePath(path)
+        val dst = safeStoragePath(File(src.parentFile, newName).absolutePath)
+        if (!src.exists() || dst.exists()) throw IllegalArgumentException("Source missing or destination already exists")
+        if (!src.renameTo(dst)) throw IllegalStateException("Rename failed")
+        return JSONObject().put("path", dst.absolutePath).toString()
+    }
+
+    @JavascriptInterface fun copyFile(path: String, destination: String): String {
+        if (!storageAllowed()) throw SecurityException("Enable All files access first")
+        val src = safeStoragePath(path); val dst = safeStoragePath(destination)
+        if (!src.isFile || dst.exists()) throw IllegalArgumentException("Source missing or destination already exists")
+        dst.parentFile?.mkdirs()
+        FileInputStream(src).use { input -> FileOutputStream(dst).use { output -> input.copyTo(output) } }
+        return JSONObject().put("path", dst.absolutePath).toString()
+    }
+
+    @JavascriptInterface fun moveFile(path: String, destination: String): String {
+        if (!storageAllowed()) throw SecurityException("Enable All files access first")
+        val src = safeStoragePath(path); val dst = safeStoragePath(destination)
+        if (!src.exists() || dst.exists()) throw IllegalArgumentException("Source missing or destination already exists")
+        dst.parentFile?.mkdirs()
+        if (!src.renameTo(dst)) {
+            if (!src.isFile) throw IllegalStateException("Move failed")
+            FileInputStream(src).use { input -> FileOutputStream(dst).use { output -> input.copyTo(output) } }
+            if (!src.delete()) { dst.delete(); throw IllegalStateException("Could not remove original after copy") }
+        }
+        return JSONObject().put("path", dst.absolutePath).toString()
+    }
+
+    @JavascriptInterface fun writeFile(path: String, data: String, keepTime: Boolean): String {
+        if (!storageAllowed()) throw SecurityException("Enable All files access first")
+        val f = safeStoragePath(path)
+        f.parentFile?.mkdirs()
+        val modified = f.lastModified()
+        val bytes = Base64.decode(data, Base64.DEFAULT)
+        FileOutputStream(f, false).use { it.write(bytes) }
+        if (keepTime && modified > 0) f.setLastModified(modified)
+        return "{}"
+    }
+
+    @JavascriptInterface fun openUrl(url: String): String {
+        val uri = Uri.parse(url)
+        val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        activity.startActivity(intent)
+        return "{}"
+    }
+
+    @JavascriptInterface fun requestOverlay(): String = "{}"
+    @JavascriptInterface fun canOverlay(): String = JSONObject().put("value", false).toString()
+    @JavascriptInterface fun setLockEnabled(enabled: Boolean): String = "{}"
+    @JavascriptInterface fun setNowPlaying(value: String): String = "{}"
+    @JavascriptInterface fun addListener(name: String): String = "{}"
 
     @JavascriptInterface fun meta(title: String, artist: String, album: String, artwork: String) {
         val i = Intent(activity, PlaybackService::class.java).apply {
