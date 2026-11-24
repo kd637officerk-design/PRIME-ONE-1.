@@ -3,6 +3,9 @@
 This project packages the supplied `PRIME_ONE_index.html` player in an Android WebView and adds a native Android media session/notification.
 
 ## Included
+- Version 2.1: phone-file modification dates are sent to the player so Date modified sorting can show newest files first.
+- Version 2.1: Android MediaStore album-art URI is supplied for scanned songs, and the player loads indexed album artwork when available.
+- The wallpaper gallery continues to support importing multiple pictures and animated GIF files from the phone.
 - The supplied EXO-1 player HTML (kept intact).
 - He-Man artwork as the Android launcher icon and bundled cover image.
 - Android media notification with **Previous**, **Play/Pause**, and **Next** controls.
@@ -10,11 +13,11 @@ This project packages the supplied `PRIME_ONE_index.html` player in an Android W
 - GitHub Actions workflow that builds and uploads a debug APK.
 
 ## Build the APK on GitHub
-1. Create a new GitHub repository.
-2. Extract this ZIP and upload all files/folders to the repository root.
+1. Back up your existing repository first.
+2. Extract this ZIP and replace the project files in your existing repository, keeping the folder structure. Upload the contents of `PRIME_ONE_Android` to the repository root.
 3. Open **Actions** → **Build EXO-1 APK**.
 4. Select **Run workflow** (or push a commit to `main`).
-5. Open the completed workflow run and download the `PRIME-ONE-debug-apk` artifact. It contains `app-debug.apk`.
+5. Open the completed workflow run and download the `EXO-1-debug-apk` artifact. It contains `app-debug.apk`.
 
 ## Build locally
 - Install Android Studio with Android SDK 35 and JDK 17.

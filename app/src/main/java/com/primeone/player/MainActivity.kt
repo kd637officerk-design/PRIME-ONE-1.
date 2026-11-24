@@ -189,7 +189,9 @@ class KD6Bridge(private val activity: Activity) {
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.ALBUM,
             MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.DATA
+            MediaStore.Audio.Media.DATA,
+            MediaStore.Audio.Media.DATE_MODIFIED,
+            MediaStore.Audio.Media.ALBUM_ID
         )
         try {
             // Query each mounted MediaStore volume. Some Android devices do not
@@ -203,7 +205,9 @@ class KD6Bridge(private val activity: Activity) {
                 val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                     MediaStore.Audio.Media.getContentUri(volume)
                 else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                val sort = "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
+                // The phone's file modification time is the source of truth:
+                // newest files first, independent of title or scan order.
+                val sort = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC, ${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
                 activity.contentResolver.query(collection, projection, null, null, sort)?.use { c ->
                     queriedVolumes++
                     val idCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
@@ -213,6 +217,8 @@ class KD6Bridge(private val activity: Activity) {
                     val albumCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                     val durationCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                     val dataCol = c.getColumnIndex(MediaStore.Audio.Media.DATA)
+                    val modifiedCol = c.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
+                    val albumIdCol = c.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
                     while (c.moveToNext()) {
                         val id = c.getLong(idCol)
                         if (!seen.add("$volume:$id")) continue
@@ -228,6 +234,9 @@ class KD6Bridge(private val activity: Activity) {
                             ?: fileName.substringBeforeLast('.', fileName)
                         val artist = c.getString(artistCol)?.takeIf { it.isNotBlank() && it != "<unknown>" }
                         val album = c.getString(albumCol)?.takeIf { it.isNotBlank() && it != "<unknown>" }
+                        val modified = if (modifiedCol >= 0 && !c.isNull(modifiedCol)) c.getLong(modifiedCol) else 0L
+                        val albumId = if (albumIdCol >= 0 && !c.isNull(albumIdCol)) c.getLong(albumIdCol) else 0L
+                        val artUri = if (albumId > 0L) "content://media/$volume/audio/albumart/$albumId" else ""
                         val item = JSONObject()
                             .put("id", "$volume:$id")
                             .put("title", title)
@@ -236,6 +245,8 @@ class KD6Bridge(private val activity: Activity) {
                             .put("folder", folder)
                             .put("uri", contentUri.toString())
                             .put("duration", (c.getLong(durationCol) / 1000.0))
+                            .put("modified", modified)
+                            .put("artUri", artUri)
                         if (artist != null) item.put("artist", artist)
                         if (album != null) item.put("album", album)
                         songs.put(item)

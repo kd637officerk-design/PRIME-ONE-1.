@@ -1795,20 +1795,27 @@ async function scanDevice(silent){
   const phonePaths=new Set(allSongs.map(x=>x.path));
   const stale=tracks.filter(t=>t.path&&t.local&&!phonePaths.has(t.path));
   for(const t of stale){tracks=tracks.filter(x=>x.id!==t.id);S.pls.forEach(p=>p.ids=p.ids.filter(i=>i!==t.id));delete S.fav[t.id];delete S.st[t.id];delete S.pos[t.id];await tx('tracks','readwrite',o=>o.delete(t.id)).catch(()=>{});if(cov[t.id]){URL.revokeObjectURL(cov[t.id]);delete cov[t.id]}}
-  {const bp=new Map(tracks.filter(t=>t.path).map(t=>[t.path,t]));songs.forEach(x=>{const o=bp.get(x.path);if(o&&!o.dur&&x.duration){o.dur=x.duration;putT(o)}})}
+  {const bp=new Map(tracks.filter(t=>t.path).map(t=>[t.path,t]));songs.forEach(x=>{const o=bp.get(x.path);if(o){let changed=false;if(x.duration&&!o.dur){o.dur=x.duration;changed=true}if(x.modified){const m=_ms(x.modified);if(m!==o.mod){o.mod=m;changed=true}}if(x.artUri&&x.artUri!==o.artUri){o.artUri=x.artUri;changed=true}if(x.artist&&!o.artist){o.artist=x.artist;changed=true}if(x.album&&!o.album){o.album=x.album;changed=true}if(changed)putT(o)}})}
   setTimeout(bgMeta,400);
   const have=new Set(tracks.filter(t=>t.path).map(t=>t.path)),fresh=songs.filter(x=>x.path&&!have.has(x.path));
-  if(!fresh.length){if(!silent)toast('No new songs found ('+songs.length+' on this phone)');return}
+  // Refresh artwork for songs already in the library too, not only newly discovered files.
+  const artNeed=tracks.filter(t=>t.local&&t.path&&!t.cover&&!t.emb&&t.artUri);
+  if(artNeed.length)setTimeout(()=>bgTags(artNeed),400);
+  if(!fresh.length){render();save();if(!silent)toast('Library refreshed ('+songs.length+' songs on this phone)');return}
   const news=[];
   for(let i=0;i<fresh.length;i++){
    const x=fresh[i],t={id:uid(),name:x.title||x.name||'Unknown',kind:'audio',blob:null,cover:null,local:1,chk:2,dur:x.duration||0,path:x.path,url:x.uri||(CAP&&CAP.convertFileSrc?CAP.convertFileSrc('file://'+x.path):'file://'+x.path),folder:x.folder||''};
    if(x.artist)t.artist=x.artist;if(x.album)t.album=x.album;
+   if(x.modified)t.mod=_ms(x.modified);if(x.artUri)t.artUri=x.artUri;
    tracks.push(t);news.push(t);await putT(t);
    if(i%50===49){if(!silent)toast('Adding '+(i+1)+' / '+fresh.length+'…');await new Promise(r=>setTimeout(r,0))}
   }
   if(!silent&&TAB.audio)S.tab=TAB.audio;render();save();
   toast('Added '+fresh.length+' songs');
-  setTimeout(bgMeta,400);bgTags(news);
+  setTimeout(bgMeta,400);
+  // Recheck new phone tracks for album artwork.
+  const newArt=tracks.filter(t=>news.includes(t)&&!t.cover&&!t.emb);
+  if(newArt.length)setTimeout(()=>bgTags(newArt),400);
   if(!silent&&typeof foldersSheet==='function')setTimeout(()=>foldersSheet(ROOT),250);
  }catch(e){toast(/denied/i.test(String(e&&e.message||e))?'Allow “Music and audio” access in Android settings, then try again':'Could not scan: '+(e&&e.message||e))}
  finally{scanBusy=false}
@@ -1837,14 +1844,21 @@ async function bgMeta(){
 }
 /* read tags + album art in the background, straight from the file (no full copy in memory) */
 async function bgTags(list){
- if(!window.jsmediatags)return;
- for(const t of list){
-  await new Promise(ok=>{try{jsmediatags.read(location.origin+new URL(t.url,location.href).pathname,{onSuccess:r=>{const g=r.tags,p=g.picture;let ch=false;
-   if(p&&p.data){t.emb=new Blob([new Uint8Array(p.data)],{type:p.format||'image/jpeg'});ch=true}
-   if(g.title&&!t.nameSet){t.name=g.title;ch=true}if(g.artist&&!t.artist){t.artist=g.artist;ch=true}if(g.album&&!t.album){t.album=g.album;ch=true}
-   const L=g.lyrics||g.USLT,ly=typeof L==='string'?L:(L&&(L.lyrics||L.text));if(ly){t.lyr=ly;ch=true}
-   if(ch)putT(t);ok()},onError:()=>ok()})}catch(_){ok()}});
-  if(list.indexOf(t)%25===24){render();await new Promise(r=>setTimeout(r,0))}
+ for(let ix=0;ix<list.length;ix++){
+  const t=list[ix];
+  // Android MediaStore album-art content URI is preferred for phone-scanned tracks.
+  if(!t.cover&&!t.emb&&t.artUri){
+   try{const r=await fetch(t.artUri);if(r.ok){const b=await r.blob();if(b.size&&/^image\//.test(b.type||'')){t.emb=b;await putT(t)}}}catch(_){}
+  }
+  // File-tag fallback for imported files or devices without indexed album art.
+  if(!t.emb&&!t.cover&&window.jsmediatags&&t.url){
+   await new Promise(ok=>{try{jsmediatags.read(t.url,{onSuccess:r=>{const g=r.tags,p=g.picture;let ch=false;
+    if(p&&p.data){t.emb=new Blob([new Uint8Array(p.data)],{type:p.format||'image/jpeg'});ch=true}
+    if(g.title&&!t.nameSet){t.name=g.title;ch=true}if(g.artist&&!t.artist){t.artist=g.artist;ch=true}if(g.album&&!t.album){t.album=g.album;ch=true}
+    const L=g.lyrics||g.USLT,ly=typeof L==='string'?L:(L&&(L.lyrics||L.text));if(ly){t.lyr=ly;ch=true}
+    if(ch)putT(t);ok()},onError:()=>ok()})}catch(_){ok()}})
+  }
+  if(ix%20===19){render();await new Promise(r=>setTimeout(r,0))}
  }
  render();save()
 }
