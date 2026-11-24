@@ -1,6 +1,7 @@
 package com.primeone.player
 
 import android.Manifest
+import android.media.MediaMetadataRetriever
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -157,6 +158,24 @@ class MainActivity : Activity() {
 class KD6Bridge(private val activity: Activity) {
     @JavascriptInterface fun hello() { /* bridge handshake */ }
 
+    // Read embedded ID3/MP4 artwork directly from the phone's original audio file.
+    // Returning a data URL lets the WebView display the real cover without copying audio.
+    @JavascriptInterface fun getArtwork(contentUri: String): String {
+        var retriever: MediaMetadataRetriever? = null
+        return try {
+            val uri = Uri.parse(contentUri)
+            if (uri.scheme != "content") return ""
+            retriever = MediaMetadataRetriever()
+            retriever.setDataSource(activity, uri)
+            val bytes = retriever.embeddedPicture ?: return ""
+            "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        } finally {
+            try { retriever?.release() } catch (_: Exception) {}
+        }
+    }
+
     // MediaStore scan used by the player's Scan and Browse by folder features.
     @JavascriptInterface fun requestMusicPermission(): Boolean {
         val permissions = if (Build.VERSION.SDK_INT >= 33) arrayOf(
@@ -189,9 +208,7 @@ class KD6Bridge(private val activity: Activity) {
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.ALBUM,
             MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.DATA,
-            MediaStore.Audio.Media.DATE_MODIFIED,
-            MediaStore.Audio.Media.ALBUM_ID
+            MediaStore.Audio.Media.DATA
         )
         try {
             // Query each mounted MediaStore volume. Some Android devices do not
@@ -205,9 +222,7 @@ class KD6Bridge(private val activity: Activity) {
                 val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                     MediaStore.Audio.Media.getContentUri(volume)
                 else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                // The phone's file modification time is the source of truth:
-                // newest files first, independent of title or scan order.
-                val sort = "${MediaStore.Audio.Media.DATE_MODIFIED} DESC, ${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
+                val sort = "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
                 activity.contentResolver.query(collection, projection, null, null, sort)?.use { c ->
                     queriedVolumes++
                     val idCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
@@ -217,8 +232,6 @@ class KD6Bridge(private val activity: Activity) {
                     val albumCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
                     val durationCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                     val dataCol = c.getColumnIndex(MediaStore.Audio.Media.DATA)
-                    val modifiedCol = c.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
-                    val albumIdCol = c.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
                     while (c.moveToNext()) {
                         val id = c.getLong(idCol)
                         if (!seen.add("$volume:$id")) continue
@@ -234,9 +247,6 @@ class KD6Bridge(private val activity: Activity) {
                             ?: fileName.substringBeforeLast('.', fileName)
                         val artist = c.getString(artistCol)?.takeIf { it.isNotBlank() && it != "<unknown>" }
                         val album = c.getString(albumCol)?.takeIf { it.isNotBlank() && it != "<unknown>" }
-                        val modified = if (modifiedCol >= 0 && !c.isNull(modifiedCol)) c.getLong(modifiedCol) else 0L
-                        val albumId = if (albumIdCol >= 0 && !c.isNull(albumIdCol)) c.getLong(albumIdCol) else 0L
-                        val artUri = if (albumId > 0L) "content://media/$volume/audio/albumart/$albumId" else ""
                         val item = JSONObject()
                             .put("id", "$volume:$id")
                             .put("title", title)
@@ -245,8 +255,6 @@ class KD6Bridge(private val activity: Activity) {
                             .put("folder", folder)
                             .put("uri", contentUri.toString())
                             .put("duration", (c.getLong(durationCol) / 1000.0))
-                            .put("modified", modified)
-                            .put("artUri", artUri)
                         if (artist != null) item.put("artist", artist)
                         if (album != null) item.put("album", album)
                         songs.put(item)
